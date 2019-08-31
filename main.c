@@ -31,10 +31,10 @@ struct Config {
     int allow_horizontal_scroll;
 };
 
-void set_default_config_values(struct Config* cfg) {
-    cfg->allow_horizontal_scroll = 0;
-    cfg->mouse_move_delta_to_scroll_threshold = 10;
-}
+struct ScreenPoint {
+    int x;
+    int y;
+};
 
 // tell Xlib that we want to receive pointer motion events
 static void select_events(Display *dpy, Window win)
@@ -69,7 +69,7 @@ static int has_xi2(Display *dpy)
     } else if (rc != Success) {
         fprintf(stderr, "Internal Error! This is a bug in Xlib.\n");
     }
-//    printf("XI2 supported. Server provides version %d.%d.\n", major, minor);
+    //    printf("XI2 supported. Server provides version %d.%d.\n", major, minor);
 
     return 1;
 }
@@ -84,13 +84,29 @@ void trigger_scroll(Display* display, enum ScrollDirection scrollDirection, int 
     uint negative_scroll_amount_btn = scrollDirection == SCROLL_VERTICAL ? SCROLL_UP : SCROLL_LEFT;
     uint postitive_scroll_amount_btn = scrollDirection == SCROLL_VERTICAL ? SCROLL_DOWN : SCROLL_RIGHT;
     uint scroll_button = amount <  0 ? negative_scroll_amount_btn : postitive_scroll_amount_btn;
-//    printf("scroll_button %d\n", scroll_button);
+    //    printf("scroll_button %d\n", scroll_button);
 
     for (int i = 0; i < abs(amount); i++)
     {
         XTestFakeButtonEvent(display, scroll_button, 1, CurrentTime); // "button" down
         XTestFakeButtonEvent(display, scroll_button, 0, CurrentTime); // "button" up
     }
+}
+
+struct ScreenPoint get_pointer_position(Display* display, Window window)
+{
+    struct ScreenPoint pos;
+
+    Window  root_ret, child_ret;
+    int win_x, win_y;
+    unsigned int mask;
+    XQueryPointer(display, window,
+                  &root_ret, &child_ret,
+                  &pos.x, &pos.y,
+                  &win_x, &win_y,
+                  &mask);
+
+    return pos;
 }
 
 void parse_args_to_cfg(int argc, char** argv, struct Config* cfg) {
@@ -148,19 +164,41 @@ void check_requirements(Display* dpy)
     }
 }
 
+struct Config create_default_config()
+{
+    struct Config cfg = {
+        .allow_horizontal_scroll = 0,
+                .mouse_move_delta_to_scroll_threshold = 10
+    };
+    return cfg;
+}
+
+void check_for_scroll(double* total_movement_y_delta, double deltaY, struct Config cfg, enum ScrollDirection scroll_direction, Display* display)
+{
+    *total_movement_y_delta += deltaY;
+    if (fabs(*total_movement_y_delta) > cfg.mouse_move_delta_to_scroll_threshold)
+    {
+        int scroll_amount = (int) (*total_movement_y_delta / cfg.mouse_move_delta_to_scroll_threshold);
+        trigger_scroll(display, scroll_direction, scroll_amount);
+
+        // adjust accumulator: reduce for distance traveled that is 'used up' by scrolling
+        // example: y mouse delta is 22, scroll threshold is 10, then scrollamount is 2 (2*10) and the (2*10) is subtracted from accumulator
+        // the (abs) new value of total_movement_y_delta is smaller mouse_move_delta_to_scroll_threshold
+        int scroll_amount_as_movement_amount = scroll_amount * (int) cfg.mouse_move_delta_to_scroll_threshold;
+        *total_movement_y_delta -= scroll_amount_as_movement_amount;
+    }
+}
+
 // TODO delcaration/definition order?
 int main(int argc, char **argv)
 {
-    struct Config cfg;
-    set_default_config_values(&cfg);
+    struct Config cfg = create_default_config();
     parse_args_to_cfg(argc, argv, &cfg);
-
-    /// main logic
 
     char* display_name = NULL;
     Display *dpy;
     if ((dpy = XOpenDisplay(display_name)) == NULL) {
-        // TODO
+        fprintf(stderr, "Failed to open display.\n");
         return -1;
     }
 
@@ -169,18 +207,7 @@ int main(int argc, char **argv)
     Window window =  DefaultRootWindow(dpy);
     select_events(dpy, window);
 
-    Window  root_ret, child_ret;
-    int root_x, root_y;
-    int win_x, win_y;
-    unsigned int mask;
-    XQueryPointer(dpy, window,
-                  &root_ret, &child_ret,
-                  &root_x, &root_y,
-                  &win_x, &win_y,
-                  &mask);
-
-    int start_x = root_x;
-    int start_y = root_y;
+    struct ScreenPoint start_pointer_pos = get_pointer_position(dpy, window);
 
     // vars for keeping track of accumulated pointer movement over time
     double total_movement_y_delta = 0;
@@ -188,8 +215,7 @@ int main(int argc, char **argv)
 
     while(1) {
         XEvent ev;
-        XGenericEventCookie *cookie = &ev.xcookie;
-        XIRawEvent *re;
+        XGenericEventCookie* cookie = &ev.xcookie;
 
         XNextEvent(dpy, &ev);
 
@@ -198,48 +224,18 @@ int main(int argc, char **argv)
             continue;
 
         switch (cookie->evtype) {
-
         case XI_RawMotion:
-            re = (XIRawEvent *) cookie->data;
-            XQueryPointer(dpy, window,
-                          &root_ret, &child_ret, &root_x, &root_y, &win_x, &win_y, &mask);
-            //            printf ("raw %g,%g root %d,%d\n",
-            //                    re->raw_values[0], re->raw_values[1],
-            //                    root_x, root_y);
-
             /// fixate pointer (set pointer to start pos)
-            XWarpPointer(dpy, None, window, 0, 0, 0, 0, start_x, start_y);
+            XWarpPointer(dpy, None, window, 0, 0, 0, 0, start_pointer_pos.x, start_pointer_pos.y);
 
-            /// translate movement to scrol
+            /// update total movement deltas and check if we need to scroll
+            XIRawEvent* raw_event = (XIRawEvent*) cookie->data;
+            double deltaX = raw_event->raw_values[0];
+            double deltaY = raw_event->raw_values[1];
 
-            double deltaX = re->raw_values[0];
-            double deltaY = re->raw_values[1];
-
-            total_movement_y_delta += deltaY;
-            if (fabs(total_movement_y_delta) > cfg.mouse_move_delta_to_scroll_threshold)
-            {
-                int scroll_amount = (int) (total_movement_y_delta / cfg.mouse_move_delta_to_scroll_threshold);
-                trigger_scroll(dpy, SCROLL_VERTICAL, scroll_amount);
-
-                // adjust accumulator: reduce for distance traveled that is 'used up' by scrolling
-                // example: y mouse delta is 22, scroll threshold is 10, then scrollamount is 2 (2*10) and the (2*10) is subtracted from accumulator
-                // the (abs) new value of total_movement_y_delta is smaller mouse_move_delta_to_scroll_threshold
-                int scroll_amount_as_movement_amount = scroll_amount * (int) cfg.mouse_move_delta_to_scroll_threshold;
-                total_movement_y_delta -= scroll_amount_as_movement_amount;
-            }
-
+            check_for_scroll(&total_movement_y_delta, deltaY, cfg, SCROLL_VERTICAL, dpy);
             if (cfg.allow_horizontal_scroll)
-            {
-                total_movement_x_delta += deltaX;
-                if (fabs(total_movement_x_delta) > cfg.mouse_move_delta_to_scroll_threshold)
-                {
-                    int scroll_amount = (int) (total_movement_x_delta / cfg.mouse_move_delta_to_scroll_threshold);
-                    trigger_scroll(dpy, SCROLL_HORIZONTAL, scroll_amount);
-
-                    int scroll_amount_as_movement_amount = scroll_amount * (int) cfg.mouse_move_delta_to_scroll_threshold;
-                    total_movement_x_delta -= scroll_amount_as_movement_amount;
-                }
-            }
+                check_for_scroll(&total_movement_x_delta, deltaX, cfg, SCROLL_HORIZONTAL, dpy);
 
             XFlush(dpy); // may not be necessary
             break;
