@@ -15,7 +15,8 @@
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
 
-const char* PROGRAM_VERSION = "0.1";
+const char* PROGRAM_VERSION = "1.0";
+int is_active = False;
 
 enum ScrollDirection
 {
@@ -44,7 +45,7 @@ struct ScreenPoint {
 };
 
 // tell Xlib that we want to receive pointer motion events
-static void request_to_receive_pointer_move_events(Display *dpy, Window win)
+static void request_to_receive_events(Display *dpy, Window win)
 {
     XIEventMask evmasks[1];
     unsigned char mask1[(XI_LASTEVENT + 7)/8];
@@ -53,12 +54,17 @@ static void request_to_receive_pointer_move_events(Display *dpy, Window win)
 
     /* select for button and key events from all master devices */
     XISetMask(mask1, XI_RawMotion);
+//    XISetMask(mask1, XI_ButtonPress);
+//    XISetMask(mask1, XI_ButtonRelease);
+    XISetMask(mask1, XI_KeyPress);
+    XISetMask(mask1, XI_KeyRelease);
 
-    evmasks[0].deviceid = XIAllMasterDevices;
+    evmasks[0].deviceid = XIAllDevices;
     evmasks[0].mask_len = sizeof(mask1);
     evmasks[0].mask = mask1;
 
     XISelectEvents(dpy, win, evmasks, 1);
+
     XFlush(dpy);
 }
 
@@ -100,6 +106,7 @@ void trigger_scroll(Display* display, struct Config* cfg, enum ScrollDirection s
 
     for (int i = 0; i < abs(amount); i++)
     {
+        // XSendEvent doesn't seem to work, so XTestFakeButtonEvent is used
         XTestFakeButtonEvent(display, scroll_button, 1, CurrentTime); // "button" down
         XTestFakeButtonEvent(display, scroll_button, 0, CurrentTime); // "button" up
         if (!cfg->allow_triggering_of_repeated_scroll_event)
@@ -131,7 +138,7 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
         while ((c = getopt (argc, argv, "Hdrhvc:")) != -1)
             switch (c)
             {
-            case 's':
+            case 'c':
                 cvalue = optarg;
                 intmax_t num = strtoimax(optarg, NULL, 10);
                 if (errno == ERANGE)
@@ -140,12 +147,12 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                     exit(-1);
                 }
                 cfg->mouse_move_delta_to_scroll_threshold = (uint) labs(num);
-                printf("s arg: %s %d", optarg, cfg->mouse_move_delta_to_scroll_threshold);
+//                printf("s arg: %s %d", optarg, cfg->mouse_move_delta_to_scroll_threshold);
                 break;
             case 'h': // print help
                 printf("Converts X pointer movement (mouse, touchpad, trackpoint, trackball) to scroll wheel events.\n\n");
                 printf("Options:\n");
-                printf("-c [x:int]\tconversion distance: pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number mean more frequent scroll events.\n");
+                printf("-c [x:int]\tconversion distance: pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
                 printf("-r\t\tallow multiple scroll events to be generated from a fast wide pointer move\n");
                 printf("-H\t\tallow horizontal scrolling\n");
                 printf("-d\t\tenable debug logging\n");
@@ -165,8 +172,8 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                 printf("%s\n", PROGRAM_VERSION);
                 exit(0);
             case '?':
-                if (optopt == 's')
-                    fprintf (stderr, "Option -%s requires an argument.\n", optopt);
+                if (optopt == 'c')
+                    fprintf (stderr, "Option -%c requires an argument.\n", optopt);
                 else if (isprint (optopt))
                     fprintf (stderr, "Unknown option `-%c'.\n", optopt);
                 else
@@ -180,7 +187,8 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
     }
 }
 
-void ensure_requirements_or_exit(Display* display)
+// returns xi opcode
+int ensure_xinput2_or_exit(Display* display)
 {
     int xi_opcode, event, error;
     if (!XQueryExtension(display, "XInputExtension", &xi_opcode, &event, &error)) {
@@ -190,6 +198,8 @@ void ensure_requirements_or_exit(Display* display)
 
     if (!has_xi2(display))
         exit(-4);
+
+    return xi_opcode;
 }
 
 Display* open_display_or_exit()
@@ -208,9 +218,9 @@ struct Config create_default_config()
     struct Config cfg =
     {
         .mouse_move_delta_to_scroll_threshold = 50,
-        .allow_horizontal_scroll = False,
-        .allow_triggering_of_repeated_scroll_event = False,
-        .show_debug_output = False,
+                .allow_horizontal_scroll = False,
+                .allow_triggering_of_repeated_scroll_event = False,
+                .show_debug_output = False,
     };
     return cfg;
 }
@@ -238,16 +248,45 @@ void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* tot
     }
 }
 
+// -1 returned if device is not found
+int find_input_device_id_by_name(Display* display, const char* device_name)
+{
+    int ret = -1;
+    int numDevices = 0;
+    XDeviceInfo* dd = XListInputDevices(display, &numDevices);
+    for(int i = 0; i < numDevices; i++)
+    {
+        //        printf("%s %ld %ld\n", dd[i].name, dd[i].id);
+        fflush(stdout);
+        if (strcasecmp(dd[i].name, device_name) == 0)
+        {
+            ret = (int) dd[i].id;
+            break;
+        }
+    }
+    XFreeDeviceList(dd);
+    return ret;
+}
+
+// TODO:
+// single instance
+// toggle
+// variable trigger code(s) from arg
 int main(int argc, char **argv)
 {
     struct Config cfg = create_default_config();
     parse_args_into_config(argc, argv, &cfg);
+    int trigger_key_code = 64; // 64 == left alt
 
     Display* display = open_display_or_exit();
-    ensure_requirements_or_exit(display);
+    int xi_opcode = ensure_xinput2_or_exit(display);
 
-    Window window =  DefaultRootWindow(display);
-    request_to_receive_pointer_move_events(display, window);
+    Window window = DefaultRootWindow(display);
+    request_to_receive_events(display, window);
+
+    int xtest_keyboard_device_id = find_input_device_id_by_name(display, "Virtual core XTEST keyboard");
+    if (xtest_keyboard_device_id == -1)
+        printf("warn: could not find 'Virtual core XTEST keyboard'. Things might not work well.");
 
     struct ScreenPoint start_pointer_pos = get_pointer_position(display, window);
 
@@ -262,11 +301,45 @@ int main(int argc, char **argv)
         XNextEvent(display, &ev);
 
         if (cookie->type != GenericEvent ||
+                cookie->extension != xi_opcode ||
                 !XGetEventData(display, cookie))
             continue;
 
+        XIRawEvent* ree = (XIRawEvent*) cookie->data;
+
         switch (cookie->evtype) {
+        case XI_KeyPress:
+        {
+            int key_code = ree->detail;
+            Bool is_repeat = ree->flags & XIKeyRepeat;
+            if (ree->deviceid != xtest_keyboard_device_id
+                    && !is_active
+                    && key_code == trigger_key_code
+                    && !is_repeat)
+            {
+                printf("ACTIVATE\n");
+                is_active = True;
+                start_pointer_pos = get_pointer_position(display, window);
+            }
+            break;
+        }
+        case XI_KeyRelease:
+        {
+            int key_code = ree->detail;
+            if (ree->deviceid != xtest_keyboard_device_id
+                    && is_active
+                    && key_code == trigger_key_code)
+            {
+                printf("DEACTIVATE\n");
+                is_active = False;
+            }
+            break;
+        }
+        case XI_ButtonPress:
+            break;
         case XI_RawMotion:
+            if (!is_active)
+                break;
             /// fixate pointer (set pointer to start pos): not the best solution (is wiggles a bit) but I've not found a bette one (maybe hide the cursor while scrolling to hide the wiggling)
             XWarpPointer(display, None, window, 0, 0, 0, 0,
                          start_pointer_pos.x, start_pointer_pos.y);
@@ -283,9 +356,11 @@ int main(int argc, char **argv)
             XFlush(display); // may not be necessary, but it's here to ensure immediacy
             break;
         }
+        fflush(stdout);
 
         XFreeEventData(display, cookie);
     }
 
     return 0;
 }
+
