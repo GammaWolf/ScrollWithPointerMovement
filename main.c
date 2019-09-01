@@ -7,10 +7,10 @@
 #include <stdlib.h>
 #include <math.h>
 #include <ctype.h>
-#include <getopt.h>
-#include <inttypes.h>
 #include <errno.h>
-#include <signal.h>
+#include <stdint.h>
+#include <getopt.h>
+#include <sys/file.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
@@ -268,12 +268,28 @@ int find_input_device_id_by_name(Display* display, const char* device_name)
     return ret;
 }
 
+void ensure_single_instance()
+{
+    // /tmp is often mounted as ramdisk (tmpfs)
+    int pid_file = open("/tmp/MouseToScroll.pid", O_CREAT | O_RDWR, 0666);
+    int rc = flock(pid_file, LOCK_EX | LOCK_NB); // non-blocking
+    if (rc)
+    {
+        if(EWOULDBLOCK == errno)
+        {
+            fprintf(stderr, "another instance is already running\n");
+            exit(-88);
+        }
+    }
+}
+
 // TODO:
-// single instance
 // toggle
 // variable trigger code(s) from arg
 int main(int argc, char **argv)
 {
+    ensure_single_instance();
+
     struct Config cfg = create_default_config();
     parse_args_into_config(argc, argv, &cfg);
     int trigger_key_code = 64; // 64 == left alt
