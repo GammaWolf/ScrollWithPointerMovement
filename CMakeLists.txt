@@ -8,5 +8,6 @@ include_directories(${X11_INCLUDE_DIR})
 
 link_libraries(libXi.so)
 link_libraries(Xtst.so)
+link_libraries(Xfixes)
 
 add_executable(${PROJECT_NAME} "main.c")

@@ -1,6 +1,6 @@
 // converts pointer (mouse, trackpad, ...) movements into scroll wheel events
 // uses XLib and XLib extension XInput2
-// cursor pos tracking based on https://keithp.com/blogs/Cursor_tracking/
+// cursor position tracking based on https://keithp.com/blogs/Cursor_tracking/
 
 #include <stdio.h>
 #include <string.h>
@@ -15,6 +15,7 @@
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
+#include <X11/extensions/Xfixes.h>
 
 static const char* PROGRAM_VERSION = "1.0";
 static int is_active = False;
@@ -277,12 +278,18 @@ void before_synthethic_scroll(Display* display, struct Config* cfg)
     scrolls_since_active++;
 }
 
-void set_active(Bool active)
+void set_is_active(Bool active, Display* display, Window window)
 {
     if (active == is_active) return;
 
     is_active = active;
     scrolls_since_active = 0; // reset
+
+    // hide/show cursor
+    if (is_active)
+        XFixesHideCursor(display, window);
+    else
+        XFixesShowCursor(display, window);
 }
 
 void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* total_movement_delta, double delta, struct Config* cfg, Display* display)
@@ -404,11 +411,11 @@ int main(int argc, char **argv)
             {
                 if (cfg.is_toggle_mode_on)
                 {
-                    set_active(!is_active);
+                    set_is_active(!is_active, display, window);
                 }
                 else if (!is_active)
                 {
-                    set_active(True);
+                    set_is_active(True, display, window);
                 }
 
                 if (is_active)
@@ -427,7 +434,7 @@ int main(int argc, char **argv)
                         && is_active
                         && is_trigger_shortcut(key_code, 0, &cfg))
                 {
-                    set_active(False);
+                    set_is_active(False, display, window);
                 }
             }
             break;
