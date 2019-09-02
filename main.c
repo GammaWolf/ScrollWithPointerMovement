@@ -18,6 +18,7 @@
 
 static const char* PROGRAM_VERSION = "1.0";
 static int is_active = False;
+#define ALT_KEY_CODE 64
 
 enum ScrollDirection
 {
@@ -44,6 +45,8 @@ struct Config {
     Bool allow_triggering_of_repeated_scroll_event;
     Bool show_debug_output;
     Bool is_toggle_mode_on;
+    int trigger_key_code;
+    int trigger_key_modifiers;
 };
 
 struct Config create_default_config()
@@ -55,6 +58,8 @@ struct Config create_default_config()
                 .allow_triggering_of_repeated_scroll_event = False,
                 .show_debug_output = False,
                 .is_toggle_mode_on = False,
+                .trigger_key_code = ALT_KEY_CODE,
+                .trigger_key_modifiers = 0,
     };
     return cfg;
 }
@@ -62,29 +67,55 @@ struct Config create_default_config()
 void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
     char *cvalue = NULL;
     int c;
-
     if (argc > 1) {
-        while ((c = getopt (argc, argv, "Htdrhvc:")) != -1)
+        while ((c = getopt (argc, argv, "Htdrhvc:s:")) != -1)
             switch (c)
             {
             case 'c':
+            {
                 cvalue = optarg;
                 intmax_t num = strtoimax(optarg, NULL, 10);
                 if (errno == ERANGE)
                 {
-                    fprintf(stderr, "error parsing value for -s. It must be a positive integer.");
+                    fprintf(stderr, "error parsing value for -%c. It must be a positive integer.",c);
                     exit(-1);
                 }
                 cfg->mouse_move_delta_to_scroll_threshold = (uint) labs(num);
-//                printf("s arg: %s %d", optarg, cfg->mouse_move_delta_to_scroll_threshold);
                 break;
+            }
+            case 's':
+            {
+                cvalue = optarg;
+                intmax_t num = strtoimax(optarg, NULL, 10);
+                if (errno == ERANGE)
+                {
+                    fprintf(stderr, "error parsing value for -%c. It must be an integer.", c);
+                    exit(-1);
+                }
+                cfg->trigger_key_code = (int) num;
+
+                // look for optional modifier arg
+                if (optind < argc && *argv[optind] != '-')
+                {
+                        num = strtoimax(argv[optind], NULL, 0);
+                        optind++;
+                        if (errno == ERANGE)
+                        {
+                            fprintf(stderr, "error parsing optional second value for -%c. It must be an integer.", c);
+                            exit(-1);
+                        }
+                        cfg->trigger_key_modifiers = (int) num;
+                }
+                break;
+            }
             case 't':
                 cfg->is_toggle_mode_on = True;
                 break;
             case 'h': // print help
                 printf("Converts X pointer movement (mouse, touchpad, trackpoint, trackball) to scroll wheel events.\n\n");
                 printf("Options:\n");
-                printf("-c [x:int]\tconversion distance: pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
+                printf("-c [d:int]\tconversion distance: pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
+                printf("-s [keycode:int] ([modifiers:int])\tshortcut\n");
                 printf("-t\t\ttoggle mode: scrolling-mode stays enabled until the combo is pressed again\n");
                 printf("-r\t\tallow multiple scroll events to be generated from a fast wide pointer move\n");
                 printf("-H\t\tallow horizontal scrolling\n");
@@ -110,9 +141,7 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                 else if (isprint (optopt))
                     fprintf (stderr, "Unknown option `-%c'.\n", optopt);
                 else
-                    fprintf (stderr,
-                             "Unknown option character `\\x%x'.\n",
-                             optopt);
+                    fprintf (stderr, "Unknown option character `\\x%x'.\n", optopt);
                 exit(1);
             default:
                 abort ();
@@ -261,7 +290,7 @@ int find_input_device_id_by_name(Display* display, const char* device_name)
     int ret = -1;
     int numDevices = 0;
     XDeviceInfo* dd = XListInputDevices(display, &numDevices);
-    for(int i = 0; i < numDevices; i++)
+    for (int i = 0; i < numDevices; i++)
     {
         //        printf("%s %ld %ld\n", dd[i].name, dd[i].id);
         fflush(stdout);
@@ -275,7 +304,18 @@ int find_input_device_id_by_name(Display* display, const char* device_name)
     return ret;
 }
 
-void ensure_single_instance()
+Bool is_trigger_shortcut(int key_code, int modifiers, struct Config* cfg)
+{
+//    printf("k %d, mod %d", key_code, modifiers);
+    if (cfg->trigger_key_modifiers > 0 // need to check modifiers?
+            && (modifiers & cfg->trigger_key_modifiers) != modifiers) // check modifiers
+    {
+        return False;
+    }
+    return key_code == cfg->trigger_key_code;
+}
+
+void ensure_single_instance_or_exit()
 {
     // /tmp is often mounted as ramdisk (tmpfs)
     int pid_file = open("/tmp/MouseToScroll.pid", O_CREAT | O_RDWR, 0666);
@@ -285,24 +325,19 @@ void ensure_single_instance()
         if(EWOULDBLOCK == errno)
         {
             fprintf(stderr, "another instance is already running\n");
-            exit(-88);
+            exit(-9);
         }
     }
 }
 
-// TODO:
-// toggle
-// variable trigger code(s) from arg
 int main(int argc, char **argv)
 {
-    ensure_single_instance();
+    ensure_single_instance_or_exit();
+    Display* display = open_display_or_exit();
+    int xi_opcode = ensure_xinput2_or_exit(display);
 
     struct Config cfg = create_default_config();
     parse_args_into_config(argc, argv, &cfg);
-    int trigger_key_code = 64; // 64 == left alt
-
-    Display* display = open_display_or_exit();
-    int xi_opcode = ensure_xinput2_or_exit(display);
 
     Window window = DefaultRootWindow(display);
     request_to_receive_events(display, window);
@@ -328,24 +363,24 @@ int main(int argc, char **argv)
                 !XGetEventData(display, cookie))
             continue;
 
-        XIRawEvent* ree = (XIRawEvent*) cookie->data;
-
         switch (cookie->evtype) {
         case XI_KeyPress:
         {
-            int key_code = ree->detail;
-            Bool is_repeat = ree->flags & XIKeyRepeat;
-            if (ree->deviceid != xtest_keyboard_device_id
-                    && key_code == trigger_key_code
+            XIDeviceEvent* event = (XIDeviceEvent*) cookie->data;
+            int key_code = event->detail;
+            Bool is_repeat = event->flags & XIKeyRepeat;
+            if (cfg.show_debug_output)
+                printf("KeyPress: key_code %d, mods %d, is_repeat %d\n", key_code, event->mods.base, is_repeat);
+
+            if (event->deviceid != xtest_keyboard_device_id
+                    && is_trigger_shortcut(key_code, event->mods.base, &cfg)
                     && !is_repeat)
             {
-                printf("ACTIVATE\n");
-
                 if (cfg.is_toggle_mode_on)
                 {
                     is_active = !is_active;
                 }
-                else
+                else if (!is_active)
                 {
                     is_active = True;
                 }
@@ -359,12 +394,12 @@ int main(int argc, char **argv)
         {
             if (!cfg.is_toggle_mode_on)
             {
-                int key_code = ree->detail;
-                if (ree->deviceid != xtest_keyboard_device_id
+                XIDeviceEvent* event = (XIDeviceEvent*) cookie->data;
+                int key_code = event->detail;
+                if (event->deviceid != xtest_keyboard_device_id
                         && is_active
-                        && key_code == trigger_key_code)
+                        && is_trigger_shortcut(key_code, 0, &cfg))
                 {
-                    printf("DEACTIVATE\n");
                     is_active = False;
                 }
             }
