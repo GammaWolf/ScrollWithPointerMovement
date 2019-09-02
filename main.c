@@ -18,6 +18,7 @@
 
 static const char* PROGRAM_VERSION = "1.0";
 static int is_active = False;
+static int scrolls_since_active = 0;
 #define ALT_KEY_CODE 64
 
 enum ScrollDirection
@@ -45,6 +46,7 @@ struct Config {
     Bool allow_triggering_of_repeated_scroll_event;
     Bool show_debug_output;
     Bool is_toggle_mode_on;
+    Bool release_trigger_button;
     int trigger_key_code;
     int trigger_key_modifiers;
 };
@@ -58,6 +60,7 @@ struct Config create_default_config()
                 .allow_triggering_of_repeated_scroll_event = False,
                 .show_debug_output = False,
                 .is_toggle_mode_on = False,
+                .release_trigger_button = True,
                 .trigger_key_code = ALT_KEY_CODE,
                 .trigger_key_modifiers = 0,
     };
@@ -68,7 +71,7 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
     char *cvalue = NULL;
     int c;
     if (argc > 1) {
-        while ((c = getopt (argc, argv, "Htdrhvc:s:")) != -1)
+        while ((c = getopt (argc, argv, "HtdRrhvc:s:")) != -1)
             switch (c)
             {
             case 'c':
@@ -114,10 +117,11 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
             case 'h': // print help
                 printf("Converts X pointer movement (mouse, touchpad, trackpoint, trackball) to scroll wheel events.\n\n");
                 printf("Options:\n");
-                printf("-c [d:int]\tconversion distance: pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
                 printf("-s [keycode:int] ([modifiers:int])\tshortcut\n");
+                printf("-c [d:int]\tconversion distance (speed): pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
+                printf("-r\t\treleases trigger button before first scroll. Example: if ctrl is the trigger key, a scroll would often resize/scale in a program. Releasing it prevents that.\n");
                 printf("-t\t\ttoggle mode: scrolling-mode stays enabled until the combo is pressed again\n");
-                printf("-r\t\tallow multiple scroll events to be generated from a fast wide pointer move\n");
+                printf("-R\t\tallow multiple scroll events to be generated from a fast wide pointer move\n");
                 printf("-H\t\tallow horizontal scrolling\n");
                 printf("-d\t\tenable debug logging\n");
                 printf("-v\t\tshow version\n");
@@ -127,6 +131,9 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                 cfg->allow_horizontal_scroll = True;
                 break;
             case 'r':
+                cfg ->release_trigger_button = True;
+                break;
+            case 'R':
                 cfg->allow_triggering_of_repeated_scroll_event = True;
                 break;
             case 'd':
@@ -261,6 +268,23 @@ Display* open_display_or_exit()
     return display;
 }
 
+void before_synthethic_scroll(Display* display, struct Config* cfg)
+{
+    if (cfg->release_trigger_button && scrolls_since_active == 0)
+    {
+        XTestFakeKeyEvent(display, (uint)cfg->trigger_key_code, False, 0);
+    }
+    scrolls_since_active++;
+}
+
+void set_active(Bool active)
+{
+    if (active == is_active) return;
+
+    is_active = active;
+    scrolls_since_active = 0; // reset
+}
+
 void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* total_movement_delta, double delta, struct Config* cfg, Display* display)
 {
     if (cfg->show_debug_output)
@@ -273,6 +297,8 @@ void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* tot
     *total_movement_delta += delta;
     if (fabs(*total_movement_delta) > cfg->mouse_move_delta_to_scroll_threshold)
     {
+        before_synthethic_scroll(display, cfg);
+
         int scroll_amount = (int) (*total_movement_delta / cfg->mouse_move_delta_to_scroll_threshold);
         trigger_scroll(display, cfg, scroll_direction, scroll_amount);
 
@@ -378,11 +404,11 @@ int main(int argc, char **argv)
             {
                 if (cfg.is_toggle_mode_on)
                 {
-                    is_active = !is_active;
+                    set_active(!is_active);
                 }
                 else if (!is_active)
                 {
-                    is_active = True;
+                    set_active(True);
                 }
 
                 if (is_active)
@@ -392,6 +418,7 @@ int main(int argc, char **argv)
         }
         case XI_KeyRelease:
         {
+            printf("KEY RELEASE");
             if (!cfg.is_toggle_mode_on)
             {
                 XIDeviceEvent* event = (XIDeviceEvent*) cookie->data;
@@ -400,7 +427,7 @@ int main(int argc, char **argv)
                         && is_active
                         && is_trigger_shortcut(key_code, 0, &cfg))
                 {
-                    is_active = False;
+                    set_active(False);
                 }
             }
             break;
