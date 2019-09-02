@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <ctype.h>
+#include <inttypes.h>
 #include <errno.h>
 #include <stdint.h>
 #include <getopt.h>
@@ -15,8 +16,8 @@
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
 
-const char* PROGRAM_VERSION = "1.0";
-int is_active = False;
+static const char* PROGRAM_VERSION = "1.0";
+static int is_active = False;
 
 enum ScrollDirection
 {
@@ -32,17 +33,92 @@ enum ScrollDirectionLinuxButtons
     SCROLL_RIGHT = 7
 };
 
+struct ScreenPoint {
+    int x;
+    int y;
+};
+
 struct Config {
     uint mouse_move_delta_to_scroll_threshold;
     Bool allow_horizontal_scroll;
     Bool allow_triggering_of_repeated_scroll_event;
     Bool show_debug_output;
+    Bool is_toggle_mode_on;
 };
 
-struct ScreenPoint {
-    int x;
-    int y;
-};
+struct Config create_default_config()
+{
+    struct Config cfg =
+    {
+        .mouse_move_delta_to_scroll_threshold = 50,
+                .allow_horizontal_scroll = False,
+                .allow_triggering_of_repeated_scroll_event = False,
+                .show_debug_output = False,
+                .is_toggle_mode_on = False,
+    };
+    return cfg;
+}
+
+void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
+    char *cvalue = NULL;
+    int c;
+
+    if (argc > 1) {
+        while ((c = getopt (argc, argv, "Htdrhvc:")) != -1)
+            switch (c)
+            {
+            case 'c':
+                cvalue = optarg;
+                intmax_t num = strtoimax(optarg, NULL, 10);
+                if (errno == ERANGE)
+                {
+                    fprintf(stderr, "error parsing value for -s. It must be a positive integer.");
+                    exit(-1);
+                }
+                cfg->mouse_move_delta_to_scroll_threshold = (uint) labs(num);
+//                printf("s arg: %s %d", optarg, cfg->mouse_move_delta_to_scroll_threshold);
+                break;
+            case 't':
+                cfg->is_toggle_mode_on = True;
+                break;
+            case 'h': // print help
+                printf("Converts X pointer movement (mouse, touchpad, trackpoint, trackball) to scroll wheel events.\n\n");
+                printf("Options:\n");
+                printf("-c [x:int]\tconversion distance: pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
+                printf("-t\t\ttoggle mode: scrolling-mode stays enabled until the combo is pressed again\n");
+                printf("-r\t\tallow multiple scroll events to be generated from a fast wide pointer move\n");
+                printf("-H\t\tallow horizontal scrolling\n");
+                printf("-d\t\tenable debug logging\n");
+                printf("-v\t\tshow version\n");
+                printf("-h\t\tshow this help\n");
+                exit(0);
+            case 'H':
+                cfg->allow_horizontal_scroll = True;
+                break;
+            case 'r':
+                cfg->allow_triggering_of_repeated_scroll_event = True;
+                break;
+            case 'd':
+                cfg->show_debug_output = True;
+                break;
+            case 'v':
+                printf("%s\n", PROGRAM_VERSION);
+                exit(0);
+            case '?':
+                if (optopt == 'c')
+                    fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+                else if (isprint (optopt))
+                    fprintf (stderr, "Unknown option `-%c'.\n", optopt);
+                else
+                    fprintf (stderr,
+                             "Unknown option character `\\x%x'.\n",
+                             optopt);
+                exit(1);
+            default:
+                abort ();
+            }
+    }
+}
 
 // tell Xlib that we want to receive pointer motion events
 static void request_to_receive_events(Display *dpy, Window win)
@@ -130,63 +206,6 @@ struct ScreenPoint get_pointer_position(Display* display, Window window)
     return pos;
 }
 
-void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
-    char *cvalue = NULL;
-    int c;
-
-    if (argc > 1) {
-        while ((c = getopt (argc, argv, "Hdrhvc:")) != -1)
-            switch (c)
-            {
-            case 'c':
-                cvalue = optarg;
-                intmax_t num = strtoimax(optarg, NULL, 10);
-                if (errno == ERANGE)
-                {
-                    fprintf(stderr, "error parsing value for -s. It must be a positive integer.");
-                    exit(-1);
-                }
-                cfg->mouse_move_delta_to_scroll_threshold = (uint) labs(num);
-//                printf("s arg: %s %d", optarg, cfg->mouse_move_delta_to_scroll_threshold);
-                break;
-            case 'h': // print help
-                printf("Converts X pointer movement (mouse, touchpad, trackpoint, trackball) to scroll wheel events.\n\n");
-                printf("Options:\n");
-                printf("-c [x:int]\tconversion distance: pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
-                printf("-r\t\tallow multiple scroll events to be generated from a fast wide pointer move\n");
-                printf("-H\t\tallow horizontal scrolling\n");
-                printf("-d\t\tenable debug logging\n");
-                printf("-v\t\tshow version\n");
-                printf("-h\t\tshow this help\n");
-                exit(0);
-            case 'H':
-                cfg->allow_horizontal_scroll = True;
-                break;
-            case 'r':
-                cfg->allow_triggering_of_repeated_scroll_event = True;
-                break;
-            case 'd':
-                cfg->show_debug_output = True;
-                break;
-            case 'v':
-                printf("%s\n", PROGRAM_VERSION);
-                exit(0);
-            case '?':
-                if (optopt == 'c')
-                    fprintf (stderr, "Option -%c requires an argument.\n", optopt);
-                else if (isprint (optopt))
-                    fprintf (stderr, "Unknown option `-%c'.\n", optopt);
-                else
-                    fprintf (stderr,
-                             "Unknown option character `\\x%x'.\n",
-                             optopt);
-                exit(1);
-            default:
-                abort ();
-            }
-    }
-}
-
 // returns xi opcode
 int ensure_xinput2_or_exit(Display* display)
 {
@@ -211,18 +230,6 @@ Display* open_display_or_exit()
         exit(-1);
     }
     return display;
-}
-
-struct Config create_default_config()
-{
-    struct Config cfg =
-    {
-        .mouse_move_delta_to_scroll_threshold = 50,
-                .allow_horizontal_scroll = False,
-                .allow_triggering_of_repeated_scroll_event = False,
-                .show_debug_output = False,
-    };
-    return cfg;
 }
 
 void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* total_movement_delta, double delta, struct Config* cfg, Display* display)
@@ -329,25 +336,37 @@ int main(int argc, char **argv)
             int key_code = ree->detail;
             Bool is_repeat = ree->flags & XIKeyRepeat;
             if (ree->deviceid != xtest_keyboard_device_id
-                    && !is_active
                     && key_code == trigger_key_code
                     && !is_repeat)
             {
                 printf("ACTIVATE\n");
-                is_active = True;
-                start_pointer_pos = get_pointer_position(display, window);
+
+                if (cfg.is_toggle_mode_on)
+                {
+                    is_active = !is_active;
+                }
+                else
+                {
+                    is_active = True;
+                }
+
+                if (is_active)
+                    start_pointer_pos = get_pointer_position(display, window);
             }
             break;
         }
         case XI_KeyRelease:
         {
-            int key_code = ree->detail;
-            if (ree->deviceid != xtest_keyboard_device_id
-                    && is_active
-                    && key_code == trigger_key_code)
+            if (!cfg.is_toggle_mode_on)
             {
-                printf("DEACTIVATE\n");
-                is_active = False;
+                int key_code = ree->detail;
+                if (ree->deviceid != xtest_keyboard_device_id
+                        && is_active
+                        && key_code == trigger_key_code)
+                {
+                    printf("DEACTIVATE\n");
+                    is_active = False;
+                }
             }
             break;
         }
