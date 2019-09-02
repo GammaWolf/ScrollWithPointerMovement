@@ -12,15 +12,21 @@
 #include <stdint.h>
 #include <getopt.h>
 #include <sys/file.h>
+#include <stdarg.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
 #include <X11/extensions/Xfixes.h>
 
-static const char* PROGRAM_VERSION = "1.0";
-static int is_active = False;
-static int scrolls_since_active = 0;
-#define ALT_KEY_CODE 64
+enum LogLevel
+{
+    LOG_OFF,
+    LOG_FATAL,
+    LOG_ERROR,
+    LOG_WARN,
+    LOG_INFO,
+    LOG_DEBUG,
+};
 
 enum ScrollDirection
 {
@@ -52,6 +58,27 @@ struct Config {
     int trigger_key_modifiers;
 };
 
+static const char* PROGRAM_VERSION = "1.0";
+static int is_active = False;
+static int scrolls_since_active = 0;
+static enum LogLevel log_level = LOG_INFO;
+#define CAPSLOCK_KEY_CODE 66
+
+void logg(enum LogLevel level, const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    if ((level == LOG_ERROR && log_level >= LOG_ERROR) || (level == LOG_FATAL && log_level >= LOG_FATAL))
+    {
+        vfprintf(stderr, fmt, args);
+    }
+    else if (log_level >= level)
+    {
+        vfprintf(stdout, fmt, args);
+    }
+    va_end(args);
+}
+
 struct Config create_default_config()
 {
     struct Config cfg =
@@ -62,10 +89,23 @@ struct Config create_default_config()
                 .show_debug_output = False,
                 .is_toggle_mode_on = False,
                 .release_trigger_button = True,
-                .trigger_key_code = ALT_KEY_CODE,
+                .trigger_key_code = CAPSLOCK_KEY_CODE,
                 .trigger_key_modifiers = 0,
     };
     return cfg;
+}
+
+void print_cfg(struct Config* cfg)
+{
+    printf("config:\n");
+    printf("mouse_move_delta_to_scroll_threshold %i\n", cfg->mouse_move_delta_to_scroll_threshold);
+    printf("allow_horizontal_scroll %i\n", cfg->allow_horizontal_scroll);
+    printf("allow_triggering_of_repeated_scroll_event %i\n", cfg->allow_triggering_of_repeated_scroll_event);
+    printf("show_debug_output %i\n", cfg->show_debug_output);
+    printf("is_toggle_mode_on %i\n", cfg->is_toggle_mode_on);
+    printf("release_trigger_button %i\n", cfg->release_trigger_button);
+    printf("trigger_key_code %i\n", cfg->trigger_key_code);
+    printf("trigger_key_modifiers %i\n", cfg->trigger_key_modifiers);
 }
 
 void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
@@ -81,7 +121,7 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                 intmax_t num = strtoimax(optarg, NULL, 10);
                 if (errno == ERANGE)
                 {
-                    fprintf(stderr, "error parsing value for -%c. It must be a positive integer.",c);
+                    logg(LOG_FATAL, "error parsing value for -%c. It must be a positive integer.", c);
                     exit(-1);
                 }
                 cfg->mouse_move_delta_to_scroll_threshold = (uint) labs(num);
@@ -93,7 +133,7 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                 intmax_t num = strtoimax(optarg, NULL, 10);
                 if (errno == ERANGE)
                 {
-                    fprintf(stderr, "error parsing value for -%c. It must be an integer.", c);
+                    logg(LOG_FATAL, "error parsing value for -%c. It must be an integer.", c);
                     exit(-1);
                 }
                 cfg->trigger_key_code = (int) num;
@@ -101,14 +141,14 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                 // look for optional modifier arg
                 if (optind < argc && *argv[optind] != '-')
                 {
-                        num = strtoimax(argv[optind], NULL, 0);
-                        optind++;
-                        if (errno == ERANGE)
-                        {
-                            fprintf(stderr, "error parsing optional second value for -%c. It must be an integer.", c);
-                            exit(-1);
-                        }
-                        cfg->trigger_key_modifiers = (int) num;
+                    num = strtoimax(argv[optind], NULL, 0);
+                    optind++;
+                    if (errno == ERANGE)
+                    {
+                        logg(LOG_FATAL, "error parsing optional second value for -%c. It must be an integer.", c);
+                        exit(-1);
+                    }
+                    cfg->trigger_key_modifiers = (int) num;
                 }
                 break;
             }
@@ -139,6 +179,7 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
                 break;
             case 'd':
                 cfg->show_debug_output = True;
+                log_level = LOG_DEBUG;
                 break;
             case 'v':
                 printf("%s\n", PROGRAM_VERSION);
@@ -167,8 +208,8 @@ static void request_to_receive_events(Display *dpy, Window win)
 
     /* select for button and key events from all master devices */
     XISetMask(mask1, XI_RawMotion);
-//    XISetMask(mask1, XI_ButtonPress);
-//    XISetMask(mask1, XI_ButtonRelease);
+    //    XISetMask(mask1, XI_ButtonPress);
+    //    XISetMask(mask1, XI_ButtonRelease);
     XISetMask(mask1, XI_KeyPress);
     XISetMask(mask1, XI_KeyRelease);
 
@@ -189,13 +230,15 @@ static int has_xi2(Display *dpy)
     int minor = 2;
 
     int rc = XIQueryVersion(dpy, &major, &minor);
-    if (rc == BadRequest) {
-        fprintf(stderr, "No XI2 support. Server supports version %d.%d only.\n", major, minor);
+    if (rc == BadRequest)
+    {
+        logg(LOG_FATAL,  "No XI2 support. Server supports version %d.%d only.\n", major, minor);
         return 0;
-    } else if (rc != Success) {
-        fprintf(stderr, "Internal Error! This is a bug in Xlib.\n");
     }
-    //    printf("XI2 supported. Server provides version %d.%d.\n", major, minor);
+    else if (rc != Success)
+    {
+        logg(LOG_WARN, "Internal Error! This is a bug in Xlib.\n");
+    }
 
     return 1;
 }
@@ -207,11 +250,10 @@ void trigger_scroll(Display* display, struct Config* cfg, enum ScrollDirection s
 {
     if (amount == 0) return;
 
-    if (cfg->show_debug_output)
-        printf("scroll %s, %dx %s\n",
-               scrollDirection == SCROLL_VERTICAL ? "v" : "h",
-               cfg->allow_triggering_of_repeated_scroll_event ? abs(amount) : 1,
-               amount < 0 ? "up" : "down");
+    logg(LOG_INFO, "scroll %s, %dx %s\n",
+         scrollDirection == SCROLL_VERTICAL ? "v" : "h",
+         cfg->allow_triggering_of_repeated_scroll_event ? abs(amount) : 1,
+         amount < 0 ? "up" : "down");
 
     uint negative_scroll_amount_btn = scrollDirection == SCROLL_VERTICAL ? SCROLL_UP : SCROLL_LEFT;
     uint postitive_scroll_amount_btn = scrollDirection == SCROLL_VERTICAL ? SCROLL_DOWN : SCROLL_RIGHT;
@@ -248,7 +290,7 @@ int ensure_xinput2_or_exit(Display* display)
 {
     int xi_opcode, event, error;
     if (!XQueryExtension(display, "XInputExtension", &xi_opcode, &event, &error)) {
-        fprintf(stderr, "Error: X Input extension not available.");
+        logg(LOG_FATAL, "Error: X Input extension not available.");
         exit(-3);
     }
 
@@ -263,7 +305,7 @@ Display* open_display_or_exit()
     char* display_name = NULL;
     Display* display;
     if ((display = XOpenDisplay(display_name)) == NULL) {
-        fprintf(stderr, "Failed to open display.\n");
+        logg(LOG_FATAL, "Failed to open display.\n");
         exit(-1);
     }
     return display;
@@ -282,6 +324,8 @@ void set_is_active(Bool active, Display* display, Window window)
 {
     if (active == is_active) return;
 
+    logg(LOG_INFO, active ? "activating\n" : "deactivating\n");
+
     is_active = active;
     scrolls_since_active = 0; // reset
 
@@ -294,12 +338,11 @@ void set_is_active(Bool active, Display* display, Window window)
 
 void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* total_movement_delta, double delta, struct Config* cfg, Display* display)
 {
-    if (cfg->show_debug_output)
-        printf ("check: dir: %s, total_movement_delta: %g, delta: %g, thres: %d\n",
-                scroll_direction == SCROLL_VERTICAL ? "v" : "h",
-                *total_movement_delta,
-                delta,
-                cfg->mouse_move_delta_to_scroll_threshold);
+    logg(LOG_DEBUG, "check: dir: %s, total_movement_delta: %g, delta: %g, thres: %d\n",
+          scroll_direction == SCROLL_VERTICAL ? "v" : "h",
+          *total_movement_delta,
+          delta,
+          cfg->mouse_move_delta_to_scroll_threshold);
 
     *total_movement_delta += delta;
     if (fabs(*total_movement_delta) > cfg->mouse_move_delta_to_scroll_threshold)
@@ -325,7 +368,7 @@ int find_input_device_id_by_name(Display* display, const char* device_name)
     XDeviceInfo* dd = XListInputDevices(display, &numDevices);
     for (int i = 0; i < numDevices; i++)
     {
-        //        printf("%s %ld %ld\n", dd[i].name, dd[i].id);
+        // printf("%s %ld %ld\n", dd[i].name, dd[i].id);
         fflush(stdout);
         if (strcasecmp(dd[i].name, device_name) == 0)
         {
@@ -339,7 +382,7 @@ int find_input_device_id_by_name(Display* display, const char* device_name)
 
 Bool is_trigger_shortcut(int key_code, int modifiers, struct Config* cfg)
 {
-//    printf("k %d, mod %d", key_code, modifiers);
+    //  printf("k %d, mod %d", key_code, modifiers);
     if (cfg->trigger_key_modifiers > 0 // need to check modifiers?
             && (modifiers & cfg->trigger_key_modifiers) != modifiers) // check modifiers
     {
@@ -366,18 +409,22 @@ void ensure_single_instance_or_exit()
 int main(int argc, char **argv)
 {
     ensure_single_instance_or_exit();
-    Display* display = open_display_or_exit();
-    int xi_opcode = ensure_xinput2_or_exit(display);
 
     struct Config cfg = create_default_config();
     parse_args_into_config(argc, argv, &cfg);
+
+    if (cfg.show_debug_output)
+        print_cfg(&cfg);
+
+    Display* display = open_display_or_exit();
+    int xi_opcode = ensure_xinput2_or_exit(display);
 
     Window window = DefaultRootWindow(display);
     request_to_receive_events(display, window);
 
     int xtest_keyboard_device_id = find_input_device_id_by_name(display, "Virtual core XTEST keyboard");
     if (xtest_keyboard_device_id == -1)
-        printf("warn: could not find 'Virtual core XTEST keyboard'. Things might not work well.");
+        logg(LOG_WARN, "could not find 'Virtual core XTEST keyboard'. Things might not work well.");
 
     struct ScreenPoint start_pointer_pos = get_pointer_position(display, window);
 
@@ -403,7 +450,7 @@ int main(int argc, char **argv)
             int key_code = event->detail;
             Bool is_repeat = event->flags & XIKeyRepeat;
             if (cfg.show_debug_output)
-                printf("KeyPress: key_code %d, mods %d, is_repeat %d\n", key_code, event->mods.base, is_repeat);
+                logg(LOG_DEBUG, "KeyPress: key_code %d, mods %d, is_repeat %d\n", key_code, event->mods.base, is_repeat);
 
             if (event->deviceid != xtest_keyboard_device_id
                     && is_trigger_shortcut(key_code, event->mods.base, &cfg)
@@ -425,11 +472,11 @@ int main(int argc, char **argv)
         }
         case XI_KeyRelease:
         {
-            printf("KEY RELEASE");
             if (!cfg.is_toggle_mode_on)
             {
                 XIDeviceEvent* event = (XIDeviceEvent*) cookie->data;
                 int key_code = event->detail;
+                logg(LOG_DEBUG, "KeyRelease: key_code %d, mods %d\n", key_code, event->mods.base);
                 if (event->deviceid != xtest_keyboard_device_id
                         && is_active
                         && is_trigger_shortcut(key_code, 0, &cfg))
@@ -444,6 +491,7 @@ int main(int argc, char **argv)
         case XI_RawMotion:
             if (!is_active)
                 break;
+
             /// fixate pointer (set pointer to start pos): not the best solution (is wiggles a bit) but I've not found a bette one (maybe hide the cursor while scrolling to hide the wiggling)
             XWarpPointer(display, None, window, 0, 0, 0, 0,
                          start_pointer_pos.x, start_pointer_pos.y);
