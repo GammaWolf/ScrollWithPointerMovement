@@ -1,5 +1,5 @@
 // converts pointer (mouse, trackpad, ...) movements into scroll wheel events
-// uses XLib and XLib extension XInput2
+// uses XLib, XLib extensions XInput2, XTest, Xfixes
 // cursor position tracking based on https://keithp.com/blogs/Cursor_tracking/
 
 #include <stdio.h>
@@ -13,6 +13,7 @@
 #include <getopt.h>
 #include <sys/file.h>
 #include <stdarg.h>
+#include <time.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
@@ -59,9 +60,13 @@ struct Config {
 };
 
 static const char* PROGRAM_VERSION = "1.0";
+static const int NANOSECOND_TO_MILLISECOND_DIV = 1000000;
+static const int SCROLL_TRIGGER_SPEED_LIMIT_MS = 30; // don't allow scrolling in too quick succession, it can't handle them so fast, so they queue up an play back, also causing more CPU load
 static int is_active = False;
 static int scrolls_since_active = 0;
 static enum LogLevel log_level = LOG_INFO;
+static struct timespec last_scroll_time;
+
 #define CAPSLOCK_KEY_CODE 66
 
 void logg(enum LogLevel level, const char* fmt, ...)
@@ -208,10 +213,10 @@ static void request_to_receive_events(Display *dpy, Window win)
 
     /* select for button and key events from all master devices */
     XISetMask(mask1, XI_RawMotion);
-    //    XISetMask(mask1, XI_ButtonPress);
-    //    XISetMask(mask1, XI_ButtonRelease);
     XISetMask(mask1, XI_KeyPress);
     XISetMask(mask1, XI_KeyRelease);
+    //    XISetMask(mask1, XI_ButtonPress);
+    //    XISetMask(mask1, XI_ButtonRelease);
 
     evmasks[0].deviceid = XIAllDevices;
     evmasks[0].mask_len = sizeof(mask1);
@@ -336,6 +341,22 @@ void set_is_active(Bool active, Display* display, Window window)
         XFixesShowCursor(display, window);
 }
 
+struct timespec diff_timespec(struct timespec start, struct timespec end)
+{
+    struct timespec temp;
+    if ((end.tv_nsec-start.tv_nsec) < 0)
+    {
+        temp.tv_sec = end.tv_sec-start.tv_sec - 1;
+        temp.tv_nsec = 1000000000 + end.tv_nsec - start.tv_nsec;
+    }
+    else
+    {
+        temp.tv_sec = end.tv_sec - start.tv_sec;
+        temp.tv_nsec = end.tv_nsec - start.tv_nsec;
+    }
+    return temp;
+}
+
 void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* total_movement_delta, double delta, struct Config* cfg, Display* display)
 {
     logg(LOG_DEBUG, "check: dir: %s, total_movement_delta: %g, delta: %g, thres: %d\n",
@@ -347,9 +368,21 @@ void check_for_scroll_trigger(enum ScrollDirection scroll_direction, double* tot
     *total_movement_delta += delta;
     if (fabs(*total_movement_delta) > cfg->mouse_move_delta_to_scroll_threshold)
     {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+
+        struct timespec time_since_last_scroll = diff_timespec(last_scroll_time, now);
+        if (time_since_last_scroll.tv_sec == 0 && (time_since_last_scroll.tv_nsec / NANOSECOND_TO_MILLISECOND_DIV) < SCROLL_TRIGGER_SPEED_LIMIT_MS)
+        {
+            logg(LOG_DEBUG, "rate limited, last scroll was just %dms ago.   \n", time_since_last_scroll.tv_nsec / NANOSECOND_TO_MILLISECOND_DIV);
+            *total_movement_delta = 0; // reset total so we don't rate limit a bunch of time for the next pointer move events, it needs to build up the total again
+            return;
+        }
+
         before_synthethic_scroll(display, cfg);
 
         int scroll_amount = (int) (*total_movement_delta / cfg->mouse_move_delta_to_scroll_threshold);
+        last_scroll_time = now;
         trigger_scroll(display, cfg, scroll_direction, scroll_amount);
 
         // adjust accumulator: reduce for distance traveled that is 'used up' by scrolling
@@ -505,7 +538,6 @@ int main(int argc, char **argv)
             if (cfg.allow_horizontal_scroll)
                 check_for_scroll_trigger(SCROLL_HORIZONTAL, &total_movement_x_delta, deltaX, &cfg, display);
 
-            XFlush(display); // may not be necessary, but it's here to ensure immediacy
             break;
         }
         fflush(stdout);
