@@ -525,7 +525,7 @@ int main(int argc, char **argv)
             if (!is_active)
                 break;
 
-            /// fixate pointer (set pointer to start pos): not the best solution (is wiggles a bit) but I've not found a bette one (maybe hide the cursor while scrolling to hide the wiggling)
+            /// fixate pointer (set pointer to start pos): not the best solution (is wiggles a bit)
             XWarpPointer(display, None, window, 0, 0, 0, 0,
                          start_pointer_pos.x, start_pointer_pos.y);
 
