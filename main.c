@@ -62,12 +62,12 @@ struct Config {
 static const char* PROGRAM_VERSION = "1.0";
 static const int NANOSECOND_TO_MILLISECOND_DIV = 1000000;
 static const int SCROLL_TRIGGER_SPEED_LIMIT_MS = 30; // don't allow scrolling in too quick succession, it can't handle them so fast, so they queue up an play back, also causing more CPU load
+static const int UNSPECIFIED_KEY_CODE = -1;
+
 static int is_active = False;
 static int scrolls_since_active = 0;
 static enum LogLevel log_level = LOG_INFO;
 static struct timespec last_scroll_time;
-
-#define CAPSLOCK_KEY_CODE 66
 
 void logg(enum LogLevel level, const char* fmt, ...)
 {
@@ -94,7 +94,7 @@ struct Config create_default_config()
                 .show_debug_output = False,
                 .is_toggle_mode_on = False,
                 .release_trigger_button = True,
-                .trigger_key_code = CAPSLOCK_KEY_CODE,
+                .trigger_key_code = UNSPECIFIED_KEY_CODE,
                 .trigger_key_modifiers = 0,
     };
     return cfg;
@@ -163,7 +163,7 @@ void parse_args_into_config(int argc, char** argv, struct Config* cfg) {
             case 'h': // print help
                 printf("Converts X pointer movement (mouse, touchpad, trackpoint, trackball) to scroll wheel events.\n\n");
                 printf("Options:\n");
-                printf("-s [keycode:int] ([modifiers:int])\tshortcut\n");
+                printf("-s [xorg keycode:int] ([modifiers:int])\tshortcut\n");
                 printf("-c [d:int]\tconversion distance (speed): pointer travel distance (in pixels) required to trigger a scroll. Determines how frequently scrolling occurs. A lower number means more frequent scroll events.\n");
                 printf("-r\t\treleases trigger button before first scroll. Example: if ctrl is the trigger key, a scroll would often resize/scale in a program. Releasing it prevents that.\n");
                 printf("-t\t\ttoggle mode: scrolling-mode stays enabled until the combo is pressed again\n");
@@ -448,6 +448,9 @@ int main(int argc, char **argv)
 
     if (cfg.show_debug_output)
         print_cfg(&cfg);
+
+    if (cfg.trigger_key_code == UNSPECIFIED_KEY_CODE)
+        logg(LOG_WARN, "warning: no trigger key code was specified\n");
 
     Display* display = open_display_or_exit();
     int xi_opcode = ensure_xinput2_or_exit(display);
