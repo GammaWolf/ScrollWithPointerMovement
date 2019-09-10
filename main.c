@@ -237,12 +237,12 @@ static int has_xi2(Display *dpy)
     int rc = XIQueryVersion(dpy, &major, &minor);
     if (rc == BadRequest)
     {
-        logg(LOG_FATAL,  "No XI2 support. Server supports version %d.%d only.\n", major, minor);
+        logg(LOG_FATAL, "XI2 not supported. XI Version required: 2.2, found: %d.%d only.\n", major, minor);
         return 0;
     }
     else if (rc != Success)
     {
-        logg(LOG_WARN, "Internal Error! This is a bug in Xlib.\n");
+        logg(LOG_WARN, "Internal Error! XIQueryVersion reportet non success..\n");
     }
 
     return 1;
